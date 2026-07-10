@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const STORAGE_KEY = "weddingPlannerGoogleDriveExcelV3";
+const DEFAULT_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbybHgS9AV61DIszp6ccmUbKFyB4eXDcBhmPc2G04NIgyckaHrlfXEH54An8TPPG452fKQ/exec";
+const STORAGE_KEY = "weddingPlannerGoogleDriveExcelV4";
 
 const DEFAULT_APP = {
   settings: {
     weddingDate: "2027-02-27",
-    sheetApiUrl: "",
+    sheetApiUrl: DEFAULT_SCRIPT_URL,
     apiSecret: "",
     autoDriveSave: false,
     lastLoadedAt: "",
@@ -50,14 +51,21 @@ function loadSaved() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
     if (!saved) return DEFAULT_APP;
-    return { ...DEFAULT_APP, ...saved, settings: { ...DEFAULT_APP.settings, ...(saved.settings || {}) } };
+    const merged = { ...DEFAULT_APP, ...saved, settings: { ...DEFAULT_APP.settings, ...(saved.settings || {}) } };
+    if (!merged.settings.sheetApiUrl) merged.settings.sheetApiUrl = DEFAULT_SCRIPT_URL;
+    return merged;
   } catch {
     return DEFAULT_APP;
   }
 }
 
-function formatMoney(value) {
+function fmtMoney(value) {
   return `${Number(value || 0).toLocaleString("ko-KR")}원`;
+}
+
+function parseMoneyText(value) {
+  const onlyDigits = String(value || "").replace(/[^0-9]/g, "");
+  return onlyDigits ? Number(onlyDigits) : 0;
 }
 
 function daysUntil(date) {
@@ -66,6 +74,11 @@ function daysUntil(date) {
   today.setHours(0, 0, 0, 0);
   const target = new Date(`${date}T00:00:00`);
   return Math.ceil((target - today) / 86400000);
+}
+
+function dateDot(dateText) {
+  if (!dateText) return "-";
+  return dateText.replaceAll("-", ".");
 }
 
 function nextId(list) {
@@ -80,17 +93,12 @@ function textToList(text) {
   return String(text || "").split(",").map((x) => x.trim()).filter(Boolean);
 }
 
-function csvEscape(value) {
-  const text = String(value ?? "");
-  return `"${text.replace(/"/g, '""')}"`;
-}
-
-function toCsv(rows) {
-  if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
-  const lines = [headers.join(",")];
-  rows.forEach((row) => lines.push(headers.map((h) => csvEscape(row[h])).join(",")));
-  return "\uFEFF" + lines.join("\n");
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function download(filename, text, type = "text/plain;charset=utf-8") {
@@ -101,6 +109,48 @@ function download(filename, text, type = "text/plain;charset=utf-8") {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function sheetHtml(name, rows) {
+  const safeName = escapeHtml(name).slice(0, 31);
+  if (!rows || rows.length === 0) {
+    return `<x:ExcelWorksheet><x:Name>${safeName}</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>`;
+  }
+  return `<x:ExcelWorksheet><x:Name>${safeName}</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>`;
+}
+
+function tableHtml(title, rows) {
+  const safeTitle = escapeHtml(title);
+  if (!rows || rows.length === 0) return `<h2>${safeTitle}</h2><table><tr><td>No data</td></tr></table>`;
+  const headers = Object.keys(rows[0]);
+  return `<h2>${safeTitle}</h2><table border="1"><thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${headers.map((h) => `<td>${escapeHtml(row[h])}</td>`).join("")}</tr>`).join("")}</tbody></table><br/>`;
+}
+
+function exportMultiSheetExcel(app) {
+  const settingsRows = [
+    { item: "결혼 날짜", value: app.settings.weddingDate },
+    { item: "저장 시간", value: new Date().toLocaleString("ko-KR") },
+    { item: "총 일정 수", value: app.tasks.length },
+    { item: "총 비용 항목 수", value: app.expenses.length },
+    { item: "총 하객 수", value: app.guests.length },
+    { item: "총 업체 수", value: app.vendors.length },
+  ];
+  const sheets = [
+    ["Settings", settingsRows],
+    ["Tasks", app.tasks],
+    ["Expenses", app.expenses.map((x) => ({ ...x, remainingAmount: Math.max(Number(x.total || 0) - Number(x.paidAmount || 0), 0) }))],
+    ["Guests", app.guests],
+    ["Vendors", app.vendors],
+    ["Timeline", app.timeline],
+  ];
+
+  const workbook = `<!DOCTYPE html><html><head><meta charset="UTF-8" />
+  <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets>${sheets.map(([name, rows]) => sheetHtml(name, rows)).join("")}</x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+  <style>table{border-collapse:collapse}th{background:#f1f5f9;font-weight:bold}td,th{padding:6px;mso-number-format:"\\@"}</style></head><body>
+  ${sheets.map(([name, rows]) => tableHtml(name, rows)).join("<hr/>")}
+  </body></html>`;
+
+  download("wedding-planner-data.xls", workbook, "application/vnd.ms-excel;charset=utf-8");
 }
 
 function badge(value) {
@@ -152,6 +202,10 @@ function TextInput(props) {
   return <input {...props} className={`w-full rounded-xl border border-slate-200 px-3 py-2 outline-none focus:ring-2 focus:ring-rose-200 ${props.className || ""}`} />;
 }
 
+function MoneyInput({ value, onChange, ...props }) {
+  return <input {...props} inputMode="numeric" value={Number(value || 0) ? fmtMoney(value) : ""} onChange={(e) => onChange(parseMoneyText(e.target.value))} className={`w-full rounded-xl border border-slate-200 px-3 py-2 text-right outline-none focus:ring-2 focus:ring-rose-200 ${props.className || ""}`} />;
+}
+
 function SelectInput({ children, ...props }) {
   return <select {...props} className={`w-full rounded-xl border border-slate-200 px-3 py-2 outline-none focus:ring-2 focus:ring-rose-200 ${props.className || ""}`}>{children}</select>;
 }
@@ -196,7 +250,7 @@ function CategoryManager({ title, value, onChange, onClose }) {
   );
 }
 
-export default function WeddingPlannerGoogleDriveExcelV3() {
+export default function WeddingPlannerGoogleDriveExcelV4() {
   const [app, setApp] = useState(loadSaved);
   const [tab, setTab] = useState("대시보드");
   const [query, setQuery] = useState("");
@@ -206,6 +260,7 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
   const [modal, setModal] = useState(null);
   const [categoryModal, setCategoryModal] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [showSecret, setShowSecret] = useState(false);
   const autoSaveTimer = useRef(null);
   const didMount = useRef(false);
 
@@ -246,6 +301,10 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
       if (manual) setSyncStatus("Google Apps Script Web App URL을 먼저 입력하세요.");
       return;
     }
+    if (!app.settings.apiSecret) {
+      if (manual) setSyncStatus("공유 비밀키를 먼저 입력하세요.");
+      return;
+    }
     if (manual) setBusy(true);
     setSyncStatus(manual ? "Google Drive에 저장 중..." : "자동 저장 중...");
     try {
@@ -266,6 +325,10 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
       setSyncStatus("Google Apps Script Web App URL을 먼저 입력하세요.");
       return;
     }
+    if (!app.settings.apiSecret) {
+      setSyncStatus("공유 비밀키를 먼저 입력하세요.");
+      return;
+    }
     setBusy(true);
     setSyncStatus("Google Drive에서 불러오는 중...");
     try {
@@ -273,6 +336,7 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
       const result = await jsonp(url);
       if (!result || !result.ok || !result.payload) throw new Error(result?.error || "저장된 데이터가 없습니다.");
       const loaded = { ...DEFAULT_APP, ...result.payload, settings: { ...DEFAULT_APP.settings, ...(result.payload.settings || {}) } };
+      if (!loaded.settings.sheetApiUrl) loaded.settings.sheetApiUrl = DEFAULT_SCRIPT_URL;
       loaded.settings.lastLoadedAt = new Date().toLocaleString("ko-KR");
       setApp(loaded);
       setSyncStatus(`불러오기 완료: ${loaded.settings.lastLoadedAt}`);
@@ -294,20 +358,25 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
     return () => clearTimeout(autoSaveTimer.current);
   }, [app.tasks, app.expenses, app.guests, app.vendors, app.timeline, app.settings.weddingDate]);
 
-  function filtered(section, fields, filterField, filterKey) {
+  function rowContainsFilter(row, value, fields) {
+    if (value === "전체") return true;
+    return fields.some((field) => String(row[field] ?? "").trim() === value);
+  }
+
+  function filtered(section, searchFields, filterFields, filterKey) {
     const q = query.trim().toLowerCase();
     const filterValue = filters[filterKey];
     return app[section].filter((row) => {
-      const matchText = !q || fields.some((field) => String(row[field] ?? "").toLowerCase().includes(q));
-      const matchFilter = !filterField || filterValue === "전체" || row[filterField] === filterValue;
+      const matchText = !q || searchFields.some((field) => String(row[field] ?? "").toLowerCase().includes(q));
+      const matchFilter = rowContainsFilter(row, filterValue, filterFields);
       return matchText && matchFilter;
     });
   }
 
-  const taskRows = filtered("tasks", ["title", "category", "status", "owner", "memo"], "category", "tasks").sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-  const expenseRows = filtered("expenses", ["item", "category", "vendor", "memo"], "category", "expenses").sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-  const guestRows = filtered("guests", ["name", "side", "group", "invite", "rsvp", "memo"], "group", "guests").sort((a, b) => String(a.group).localeCompare(String(b.group), "ko") || String(a.name).localeCompare(String(b.name), "ko"));
-  const vendorRows = filtered("vendors", ["name", "category", "contact", "manager", "memo"], "category", "vendors").sort((a, b) => new Date(a.balanceDate) - new Date(b.balanceDate));
+  const taskRows = filtered("tasks", ["title", "category", "status", "owner", "memo"], ["category", "owner", "status"], "tasks").sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+  const expenseRows = filtered("expenses", ["item", "category", "vendor", "memo"], ["category", "vendor", "item"], "expenses").sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+  const guestRows = filtered("guests", ["name", "side", "group", "invite", "rsvp", "memo"], ["group", "side", "name", "invite", "rsvp"], "guests").sort((a, b) => String(a.group).localeCompare(String(b.group), "ko") || String(a.name).localeCompare(String(b.name), "ko"));
+  const vendorRows = filtered("vendors", ["name", "category", "contact", "manager", "memo"], ["category", "manager", "name", "status"], "vendors").sort((a, b) => new Date(a.balanceDate) - new Date(b.balanceDate));
   const timelineRows = app.timeline.filter((row) => !query.trim() || ["time", "title", "owner", "place", "memo"].some((field) => String(row[field] ?? "").toLowerCase().includes(query.toLowerCase()))).sort((a, b) => String(a.time).localeCompare(String(b.time)));
 
   function openForm(section, row = null) {
@@ -356,14 +425,6 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
     download("wedding-planner-drive-excel-backup.json", JSON.stringify(buildPayload(), null, 2), "application/json;charset=utf-8");
   }
 
-  function exportCsv() {
-    download("wedding-tasks.csv", toCsv(app.tasks), "text/csv;charset=utf-8");
-    setTimeout(() => download("wedding-expenses.csv", toCsv(app.expenses), "text/csv;charset=utf-8"), 150);
-    setTimeout(() => download("wedding-guests.csv", toCsv(app.guests), "text/csv;charset=utf-8"), 300);
-    setTimeout(() => download("wedding-vendors.csv", toCsv(app.vendors), "text/csv;charset=utf-8"), 450);
-    setTimeout(() => download("wedding-timeline.csv", toCsv(app.timeline), "text/csv;charset=utf-8"), 600);
-  }
-
   async function importJson(event) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -397,7 +458,6 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
     if (!modal) return null;
     const f = modal.form;
     const setF = (patch) => setModal((prev) => ({ ...prev, form: { ...prev.form, ...patch } }));
-
     const titles = { tasks: "일정", expenses: "비용", guests: "하객", vendors: "업체", timeline: "타임라인" };
 
     return (
@@ -414,14 +474,14 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
         {modal.section === "expenses" && <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <Field label="비용 항목"><TextInput value={f.item} onChange={(e) => setF({ item: e.target.value })} placeholder="예: 웨딩홀, 예복, 청첩장" /></Field>
           <Field label="카테고리"><SelectInput value={f.category} onChange={(e) => setF({ category: e.target.value })}>{app.settings.expenseCategories.map((x) => <option key={x}>{x}</option>)}</SelectInput></Field>
-          <Field label="총 금액" help="해당 항목의 전체 계약/예상 금액입니다."><TextInput type="number" value={f.total} onChange={(e) => setF({ total: e.target.value })} /></Field>
-          <Field label="결제한 금액" help="현재까지 실제 결제한 누적 금액입니다."><TextInput type="number" value={f.paidAmount} onChange={(e) => setF({ paidAmount: e.target.value })} /></Field>
-          <Field label="계약금" help="계약 시 선결제한 금액입니다."><TextInput type="number" value={f.deposit} onChange={(e) => setF({ deposit: e.target.value })} /></Field>
-          <Field label="중도금" help="중간 결제 예정 또는 결제한 금액입니다."><TextInput type="number" value={f.interimPayment} onChange={(e) => setF({ interimPayment: e.target.value })} /></Field>
-          <Field label="잔금" help="최종 납부해야 할 금액입니다."><TextInput type="number" value={f.finalPayment} onChange={(e) => setF({ finalPayment: e.target.value })} /></Field>
+          <Field label="총 금액" help="해당 항목의 전체 계약/예상 금액입니다."><MoneyInput value={f.total} onChange={(value) => setF({ total: value })} /></Field>
+          <Field label="결제한 금액" help="현재까지 실제 결제한 누적 금액입니다."><MoneyInput value={f.paidAmount} onChange={(value) => setF({ paidAmount: value })} /></Field>
+          <Field label="계약금" help="계약 시 선결제한 금액입니다."><MoneyInput value={f.deposit} onChange={(value) => setF({ deposit: value })} /></Field>
+          <Field label="중도금" help="중간 결제 예정 또는 결제한 금액입니다."><MoneyInput value={f.interimPayment} onChange={(value) => setF({ interimPayment: value })} /></Field>
+          <Field label="잔금" help="최종 납부해야 할 금액입니다."><MoneyInput value={f.finalPayment} onChange={(value) => setF({ finalPayment: value })} /></Field>
           <Field label="잔금/마감일"><TextInput type="date" value={f.dueDate} onChange={(e) => setF({ dueDate: e.target.value })} /></Field>
           <Field label="업체명"><TextInput value={f.vendor} onChange={(e) => setF({ vendor: e.target.value })} /></Field>
-          <Field label="남은 금액"><TextInput readOnly value={formatMoney(Math.max(Number(f.total || 0) - Number(f.paidAmount || 0), 0))} /></Field>
+          <Field label="남은 금액"><TextInput readOnly value={fmtMoney(Math.max(Number(f.total || 0) - Number(f.paidAmount || 0), 0))} /></Field>
           <Field label="메모"><TextInput value={f.memo} onChange={(e) => setF({ memo: e.target.value })} /></Field>
         </div>}
 
@@ -443,7 +503,7 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
           <Field label="담당자"><TextInput value={f.manager} onChange={(e) => setF({ manager: e.target.value })} /></Field>
           <Field label="계약일"><TextInput type="date" value={f.contractDate} onChange={(e) => setF({ contractDate: e.target.value })} /></Field>
           <Field label="잔금일"><TextInput type="date" value={f.balanceDate} onChange={(e) => setF({ balanceDate: e.target.value })} /></Field>
-          <Field label="계약 금액"><TextInput type="number" value={f.amount} onChange={(e) => setF({ amount: e.target.value })} /></Field>
+          <Field label="계약 금액"><MoneyInput value={f.amount} onChange={(value) => setF({ amount: value })} /></Field>
           <Field label="상태"><SelectInput value={f.status} onChange={(e) => setF({ status: e.target.value })}>{VENDOR_STATUS.map((x) => <option key={x}>{x}</option>)}</SelectInput></Field>
           <Field label="메모"><TextInput value={f.memo} onChange={(e) => setF({ memo: e.target.value })} /></Field>
         </div>}
@@ -466,17 +526,16 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
 
   function updateCategoryList(key, nextList) {
     const map = { tasks: "taskCategories", expenses: "expenseCategories", guests: "guestGroups", vendors: "vendorCategories" };
-    const settingKey = map[key];
-    updateSettings({ [settingKey]: nextList });
+    updateSettings({ [map[key]]: nextList });
     setFilters((prev) => ({ ...prev, [key]: "전체" }));
   }
 
   const statData = [
     ["본식까지", `D-${daysUntil(app.settings.weddingDate)}`],
     ["진행률", `${stats.progress}%`],
-    ["총 금액", formatMoney(stats.totalCost)],
-    ["결제한 금액", formatMoney(stats.paidCost)],
-    ["남은 금액", formatMoney(stats.remainingCost)],
+    ["총 금액", fmtMoney(stats.totalCost)],
+    ["결제한 금액", fmtMoney(stats.paidCost)],
+    ["남은 금액", fmtMoney(stats.remainingCost)],
     ["참석/예상", `${stats.rsvpYes}/${stats.guestTotal}명`],
   ];
 
@@ -490,6 +549,7 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
               <div className="flex flex-wrap items-end gap-3">
                 <h1 className="text-3xl font-bold tracking-tight md:text-4xl">결혼 준비 통합 관리 앱</h1>
                 <span className="rounded-2xl bg-rose-100 px-4 py-2 text-lg font-bold text-rose-700">D-{daysUntil(app.settings.weddingDate)}</span>
+                <span className="rounded-2xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700">{dateDot(app.settings.weddingDate)}</span>
               </div>
               <p className="mt-2 text-slate-500">Google Drive의 Excel 파일을 저장/백업 파일로 사용하고, 여러 사람이 같은 데이터를 불러와 최신화할 수 있습니다.</p>
             </div>
@@ -497,7 +557,7 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
               <Button onClick={() => saveToDrive(true)} disabled={busy} className="bg-slate-900 text-white">Drive 저장</Button>
               <Button onClick={loadFromDrive} disabled={busy} className="border bg-white">Drive 불러오기</Button>
               <Button onClick={exportJson} className="border bg-white">JSON</Button>
-              <Button onClick={exportCsv} className="border bg-white">CSV</Button>
+              <Button onClick={() => exportMultiSheetExcel(app)} className="border bg-white">Excel</Button>
             </div>
           </div>
           <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-600">상태: {syncStatus}</div>
@@ -513,20 +573,20 @@ export default function WeddingPlannerGoogleDriveExcelV3() {
 
         {tab === "대시보드" && <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
           <Card className="xl:col-span-2"><h2 className="mb-4 text-xl font-bold">임박한 일정</h2><div className="space-y-3">{app.tasks.filter((x) => x.status !== "완료").sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)).slice(0, 7).map((x) => <div key={x.id} className="flex justify-between gap-3 rounded-2xl border bg-white p-4"><div><p className="font-semibold">{x.title}</p><p className="text-sm text-slate-500">{x.category} · {x.dueDate} · 담당 {x.owner} · {daysUntil(x.dueDate) >= 0 ? `D-${daysUntil(x.dueDate)}` : `${Math.abs(daysUntil(x.dueDate))}일 지남`}</p></div><StatusBadge value={x.status} /></div>)}</div></Card>
-          <Card><h2 className="mb-4 text-xl font-bold">비용 요약</h2><div className="space-y-3"><div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">총 금액</p><p className="text-2xl font-bold">{formatMoney(stats.totalCost)}</p></div><div className="rounded-2xl bg-emerald-50 p-4"><p className="text-sm text-slate-500">결제한 금액</p><p className="text-2xl font-bold">{formatMoney(stats.paidCost)}</p></div><div className="rounded-2xl bg-rose-50 p-4"><p className="text-sm text-slate-500">남은 금액</p><p className="text-2xl font-bold">{formatMoney(stats.remainingCost)}</p></div></div></Card>
+          <Card><h2 className="mb-4 text-xl font-bold">비용 요약</h2><div className="space-y-3"><div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">총 금액</p><p className="text-2xl font-bold">{fmtMoney(stats.totalCost)}</p></div><div className="rounded-2xl bg-emerald-50 p-4"><p className="text-sm text-slate-500">결제한 금액</p><p className="text-2xl font-bold">{fmtMoney(stats.paidCost)}</p></div><div className="rounded-2xl bg-rose-50 p-4"><p className="text-sm text-slate-500">남은 금액</p><p className="text-2xl font-bold">{fmtMoney(stats.remainingCost)}</p></div></div></Card>
         </div>}
 
         {tab === "일정" && <>{categoryToolbar("tasks", app.settings.taskCategories, "일정")}<Card><div className="mb-4 flex items-center justify-between"><h2 className="text-xl font-bold">일정/체크리스트</h2><Button onClick={() => openForm("tasks")} className="bg-slate-900 text-white">일정 추가</Button></div><div className="space-y-3">{taskRows.map((x) => <div key={x.id} className="rounded-2xl border bg-white p-4"><div className="flex justify-between gap-3"><div><div className="mb-2 flex flex-wrap gap-2"><StatusBadge value={x.status} /><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{x.category}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{x.owner}</span></div><p className="font-semibold">{x.title}</p><p className="text-sm text-slate-500">마감 {x.dueDate} · {daysUntil(x.dueDate) >= 0 ? `D-${daysUntil(x.dueDate)}` : `${Math.abs(daysUntil(x.dueDate))}일 지남`}</p>{x.memo && <p className="text-sm text-slate-500">{x.memo}</p>}</div><div className="flex gap-1"><button onClick={() => openForm("tasks", x)} className="rounded-xl p-2 hover:bg-slate-100">수정</button><button onClick={() => requestDelete("tasks", x)} className="rounded-xl p-2 text-rose-500 hover:bg-rose-50">삭제</button></div></div></div>)}</div></Card></>}
 
-        {tab === "비용" && <>{categoryToolbar("expenses", app.settings.expenseCategories, "비용")}<Card><div className="mb-4 flex items-center justify-between"><h2 className="text-xl font-bold">비용 관리</h2><Button onClick={() => openForm("expenses")} className="bg-slate-900 text-white">비용 추가</Button></div><div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-3"><div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">총 금액</p><p className="text-2xl font-bold">{formatMoney(stats.totalCost)}</p></div><div className="rounded-2xl bg-emerald-50 p-4"><p className="text-sm text-slate-500">결제한 금액</p><p className="text-2xl font-bold">{formatMoney(stats.paidCost)}</p></div><div className="rounded-2xl bg-rose-50 p-4"><p className="text-sm text-slate-500">남은 금액</p><p className="text-2xl font-bold">{formatMoney(stats.remainingCost)}</p></div></div><div className="space-y-3">{expenseRows.map((x) => { const left = Math.max(Number(x.total || 0) - Number(x.paidAmount || 0), 0); return <div key={x.id} className="rounded-2xl border bg-white p-4"><div className="flex justify-between gap-3"><div><div className="mb-2 flex flex-wrap gap-2"><StatusBadge value={left === 0 && Number(x.total || 0) > 0 ? "결제완료" : "미결제"} /><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{x.category}</span></div><p className="font-semibold">{x.item}</p><p className="text-sm text-slate-500">총 {formatMoney(x.total)} · 결제 {formatMoney(x.paidAmount)} · 남음 {formatMoney(left)}</p><p className="text-sm text-slate-500">계약금 {formatMoney(x.deposit)} · 중도금 {formatMoney(x.interimPayment)} · 잔금 {formatMoney(x.finalPayment)}</p><p className="text-sm text-slate-500">잔금/마감 {x.dueDate} · {daysUntil(x.dueDate) >= 0 ? `D-${daysUntil(x.dueDate)}` : `${Math.abs(daysUntil(x.dueDate))}일 지남`}</p>{x.vendor && <p className="text-sm text-slate-500">업체 {x.vendor}</p>}{x.memo && <p className="text-sm text-slate-500">{x.memo}</p>}</div><div className="flex gap-1"><button onClick={() => openForm("expenses", x)} className="rounded-xl p-2 hover:bg-slate-100">수정</button><button onClick={() => requestDelete("expenses", x)} className="rounded-xl p-2 text-rose-500 hover:bg-rose-50">삭제</button></div></div></div>})}</div></Card></>}
+        {tab === "비용" && <>{categoryToolbar("expenses", app.settings.expenseCategories, "비용")}<Card><div className="mb-4 flex items-center justify-between"><h2 className="text-xl font-bold">비용 관리</h2><Button onClick={() => openForm("expenses")} className="bg-slate-900 text-white">비용 추가</Button></div><div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-3"><div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">총 금액</p><p className="text-2xl font-bold">{fmtMoney(stats.totalCost)}</p></div><div className="rounded-2xl bg-emerald-50 p-4"><p className="text-sm text-slate-500">결제한 금액</p><p className="text-2xl font-bold">{fmtMoney(stats.paidCost)}</p></div><div className="rounded-2xl bg-rose-50 p-4"><p className="text-sm text-slate-500">남은 금액</p><p className="text-2xl font-bold">{fmtMoney(stats.remainingCost)}</p></div></div><div className="space-y-3">{expenseRows.map((x) => { const left = Math.max(Number(x.total || 0) - Number(x.paidAmount || 0), 0); return <div key={x.id} className="rounded-2xl border bg-white p-4"><div className="flex justify-between gap-3"><div><div className="mb-2 flex flex-wrap gap-2"><StatusBadge value={left === 0 && Number(x.total || 0) > 0 ? "결제완료" : "미결제"} /><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{x.category}</span></div><p className="font-semibold">{x.item}</p><p className="text-sm text-slate-500">총 {fmtMoney(x.total)} · 결제 {fmtMoney(x.paidAmount)} · 남음 {fmtMoney(left)}</p><p className="text-sm text-slate-500">계약금 {fmtMoney(x.deposit)} · 중도금 {fmtMoney(x.interimPayment)} · 잔금 {fmtMoney(x.finalPayment)}</p><p className="text-sm text-slate-500">잔금/마감 {x.dueDate} · {daysUntil(x.dueDate) >= 0 ? `D-${daysUntil(x.dueDate)}` : `${Math.abs(daysUntil(x.dueDate))}일 지남`}</p>{x.vendor && <p className="text-sm text-slate-500">업체 {x.vendor}</p>}{x.memo && <p className="text-sm text-slate-500">{x.memo}</p>}</div><div className="flex gap-1"><button onClick={() => openForm("expenses", x)} className="rounded-xl p-2 hover:bg-slate-100">수정</button><button onClick={() => requestDelete("expenses", x)} className="rounded-xl p-2 text-rose-500 hover:bg-rose-50">삭제</button></div></div></div>})}</div></Card></>}
 
         {tab === "하객" && <>{categoryToolbar("guests", app.settings.guestGroups, "하객")}<Card><div className="mb-4 flex items-center justify-between"><h2 className="text-xl font-bold">하객/청첩장 관리</h2><Button onClick={() => openForm("guests")} className="bg-slate-900 text-white">하객 추가</Button></div><div className="grid grid-cols-1 gap-3 md:grid-cols-2">{guestRows.map((x) => <div key={x.id} className="rounded-2xl border bg-white p-4"><div className="flex justify-between gap-3"><div><div className="mb-2 flex flex-wrap gap-2"><StatusBadge value={x.rsvp} /><StatusBadge value={x.invite} /><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{x.side}</span></div><p className="font-semibold">{x.name}</p><p className="text-sm text-slate-500">{x.group} · {x.count}명 · 식사 {x.meal}</p>{x.memo && <p className="text-sm text-slate-500">{x.memo}</p>}</div><div className="flex gap-1"><button onClick={() => openForm("guests", x)} className="rounded-xl p-2 hover:bg-slate-100">수정</button><button onClick={() => requestDelete("guests", x)} className="rounded-xl p-2 text-rose-500 hover:bg-rose-50">삭제</button></div></div></div>)}</div></Card></>}
 
-        {tab === "업체" && <>{categoryToolbar("vendors", app.settings.vendorCategories, "업체")}<Card><div className="mb-4 flex items-center justify-between"><h2 className="text-xl font-bold">업체/연락처 관리</h2><Button onClick={() => openForm("vendors")} className="bg-slate-900 text-white">업체 추가</Button></div><div className="grid grid-cols-1 gap-3 md:grid-cols-2">{vendorRows.map((x) => <div key={x.id} className="rounded-2xl border bg-white p-4"><div className="flex justify-between gap-3"><div><div className="mb-2 flex flex-wrap gap-2"><StatusBadge value={x.status} /><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{x.category}</span></div><p className="font-semibold">{x.name}</p><p className="text-sm text-slate-500">담당 {x.manager || "-"} · 연락처 {x.contact || "-"}</p><p className="text-sm text-slate-500">잔금 {x.balanceDate} · {daysUntil(x.balanceDate) >= 0 ? `D-${daysUntil(x.balanceDate)}` : `${Math.abs(daysUntil(x.balanceDate))}일 지남`}</p><p className="text-sm text-slate-500">금액 {formatMoney(x.amount)}</p>{x.memo && <p className="text-sm text-slate-500">{x.memo}</p>}</div><div className="flex gap-1"><button onClick={() => openForm("vendors", x)} className="rounded-xl p-2 hover:bg-slate-100">수정</button><button onClick={() => requestDelete("vendors", x)} className="rounded-xl p-2 text-rose-500 hover:bg-rose-50">삭제</button></div></div></div>)}</div></Card></>}
+        {tab === "업체" && <>{categoryToolbar("vendors", app.settings.vendorCategories, "업체")}<Card><div className="mb-4 flex items-center justify-between"><h2 className="text-xl font-bold">업체/연락처 관리</h2><Button onClick={() => openForm("vendors")} className="bg-slate-900 text-white">업체 추가</Button></div><div className="grid grid-cols-1 gap-3 md:grid-cols-2">{vendorRows.map((x) => <div key={x.id} className="rounded-2xl border bg-white p-4"><div className="flex justify-between gap-3"><div><div className="mb-2 flex flex-wrap gap-2"><StatusBadge value={x.status} /><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">{x.category}</span></div><p className="font-semibold">{x.name}</p><p className="text-sm text-slate-500">담당 {x.manager || "-"} · 연락처 {x.contact || "-"}</p><p className="text-sm text-slate-500">잔금 {x.balanceDate} · {daysUntil(x.balanceDate) >= 0 ? `D-${daysUntil(x.balanceDate)}` : `${Math.abs(daysUntil(x.balanceDate))}일 지남`}</p><p className="text-sm text-slate-500">금액 {fmtMoney(x.amount)}</p>{x.memo && <p className="text-sm text-slate-500">{x.memo}</p>}</div><div className="flex gap-1"><button onClick={() => openForm("vendors", x)} className="rounded-xl p-2 hover:bg-slate-100">수정</button><button onClick={() => requestDelete("vendors", x)} className="rounded-xl p-2 text-rose-500 hover:bg-rose-50">삭제</button></div></div></div>)}</div></Card></>}
 
         {tab === "타임라인" && <Card><div className="mb-4 flex items-center justify-between"><h2 className="text-xl font-bold">본식 당일 타임라인</h2><Button onClick={() => openForm("timeline")} className="bg-slate-900 text-white">타임라인 추가</Button></div><div className="relative ml-4 space-y-4 border-l-2 border-rose-200">{timelineRows.map((x) => <div key={x.id} className="relative pl-6"><div className="absolute -left-[9px] top-4 h-4 w-4 rounded-full bg-rose-500" /><div className="rounded-2xl border bg-white p-4"><div className="flex justify-between gap-3"><div><p className="text-sm font-bold text-rose-500">{x.time}</p><p className="font-semibold">{x.title}</p><p className="text-sm text-slate-500">담당 {x.owner} · 장소 {x.place || "-"}</p>{x.memo && <p className="text-sm text-slate-500">{x.memo}</p>}</div><div className="flex gap-1"><button onClick={() => openForm("timeline", x)} className="rounded-xl p-2 hover:bg-slate-100">수정</button><button onClick={() => requestDelete("timeline", x)} className="rounded-xl p-2 text-rose-500 hover:bg-rose-50">삭제</button></div></div></div></div>)}</div></Card>}
 
-        {tab === "설정" && <Card><h2 className="mb-4 text-xl font-bold">설정 / Google Drive Excel 저장소</h2><div className="space-y-5"><div className="grid grid-cols-1 gap-3 md:grid-cols-2"><Field label="결혼 날짜"><TextInput type="date" value={app.settings.weddingDate} onChange={(e) => updateSettings({ weddingDate: e.target.value })} /></Field><Field label="D-day"><TextInput readOnly value={`D-${daysUntil(app.settings.weddingDate)}`} /></Field><Field label="Google Apps Script Web App URL"><TextInput value={app.settings.sheetApiUrl} onChange={(e) => updateSettings({ sheetApiUrl: e.target.value })} placeholder="https://script.google.com/macros/s/.../exec" /></Field><Field label="공유 비밀키"><TextInput value={app.settings.apiSecret} onChange={(e) => updateSettings({ apiSecret: e.target.value })} /></Field><label className="flex items-center gap-2 rounded-2xl border p-3 md:col-span-2"><input type="checkbox" checked={app.settings.autoDriveSave} onChange={(e) => updateSettings({ autoDriveSave: e.target.checked })} /> 변경 후 자동으로 Drive 저장</label></div><div className="grid grid-cols-1 gap-3 md:grid-cols-2"><Field label="담당자 목록"><TextInput value={listToText(app.settings.owners)} onChange={(e) => updateSettings({ owners: textToList(e.target.value) })} /></Field><Field label="일정 상태 목록"><TextInput value={listToText(app.settings.taskStatuses)} onChange={(e) => updateSettings({ taskStatuses: textToList(e.target.value) })} /></Field></div><div className="flex flex-wrap gap-2"><Button onClick={() => saveToDrive(true)} disabled={busy} className="bg-slate-900 text-white">Drive 저장</Button><Button onClick={loadFromDrive} disabled={busy} className="border bg-white">Drive 불러오기</Button><label className="cursor-pointer rounded-xl border bg-white px-3 py-2 text-sm font-semibold">JSON 불러오기<input type="file" accept="application/json" onChange={importJson} className="hidden" /></label><Button onClick={() => { if (confirm("샘플 데이터로 초기화할까요?")) setApp(DEFAULT_APP); }} className="border border-rose-200 bg-white text-rose-600">샘플 초기화</Button></div><div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">마지막 불러오기: {app.settings.lastLoadedAt || "-"}<br />마지막 저장: {app.settings.lastSavedAt || "-"}<br />{syncStatus}</div></div></Card>}
+        {tab === "설정" && <Card><h2 className="mb-4 text-xl font-bold">설정 / Google Drive Excel 저장소</h2><div className="space-y-5"><div className="grid grid-cols-1 gap-3 md:grid-cols-2"><Field label="결혼 날짜"><TextInput type="date" value={app.settings.weddingDate} onChange={(e) => updateSettings({ weddingDate: e.target.value })} /></Field><Field label="D-day"><TextInput readOnly value={`D-${daysUntil(app.settings.weddingDate)}`} /></Field><Field label="Google Apps Script Web App URL"><TextInput value={app.settings.sheetApiUrl} onChange={(e) => updateSettings({ sheetApiUrl: e.target.value })} placeholder={DEFAULT_SCRIPT_URL} /></Field><Field label="공유 비밀키" help="기본은 숨김 표시입니다. 보기 버튼으로 실제 값을 확인할 수 있습니다."><div className="flex gap-2"><TextInput type={showSecret ? "text" : "password"} value={app.settings.apiSecret} onChange={(e) => updateSettings({ apiSecret: e.target.value })} placeholder="***" /><Button onClick={() => setShowSecret((prev) => !prev)} className="shrink-0 border bg-white">{showSecret ? "숨김" : "보기"}</Button></div></Field><label className="flex items-center gap-2 rounded-2xl border p-3 md:col-span-2"><input type="checkbox" checked={app.settings.autoDriveSave} onChange={(e) => updateSettings({ autoDriveSave: e.target.checked })} /> 변경 후 자동으로 Drive 저장</label></div><div className="grid grid-cols-1 gap-3 md:grid-cols-2"><Field label="담당자 목록"><TextInput value={listToText(app.settings.owners)} onChange={(e) => updateSettings({ owners: textToList(e.target.value) })} /></Field><Field label="일정 상태 목록"><TextInput value={listToText(app.settings.taskStatuses)} onChange={(e) => updateSettings({ taskStatuses: textToList(e.target.value) })} /></Field></div><div className="flex flex-wrap gap-2"><Button onClick={() => saveToDrive(true)} disabled={busy} className="bg-slate-900 text-white">Drive 저장</Button><Button onClick={loadFromDrive} disabled={busy} className="border bg-white">Drive 불러오기</Button><label className="cursor-pointer rounded-xl border bg-white px-3 py-2 text-sm font-semibold">JSON 불러오기<input type="file" accept="application/json" onChange={importJson} className="hidden" /></label><Button onClick={() => { if (confirm("샘플 데이터로 초기화할까요?")) setApp(DEFAULT_APP); }} className="border border-rose-200 bg-white text-rose-600">샘플 초기화</Button></div><div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-600">마지막 불러오기: {app.settings.lastLoadedAt || "-"}<br />마지막 저장: {app.settings.lastSavedAt || "-"}<br />{syncStatus}</div></div></Card>}
 
         {renderModalForm()}
 
